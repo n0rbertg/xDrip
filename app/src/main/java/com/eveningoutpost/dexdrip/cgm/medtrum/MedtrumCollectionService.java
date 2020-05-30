@@ -5,6 +5,7 @@ import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
 import android.os.PowerManager;
+import android.text.SpannableString;
 import android.util.Pair;
 
 import com.eveningoutpost.dexdrip.Home;
@@ -15,6 +16,7 @@ import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.Prediction;
 import com.eveningoutpost.dexdrip.Models.TransmitterData;
 import com.eveningoutpost.dexdrip.Models.UserError;
+import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.JamBaseBluetoothService;
 import com.eveningoutpost.dexdrip.UtilityModels.BgGraphBuilder;
 import com.eveningoutpost.dexdrip.UtilityModels.Constants;
@@ -24,6 +26,7 @@ import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.UtilityModels.RxBleProvider;
 import com.eveningoutpost.dexdrip.UtilityModels.StatusItem;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.AnnexARx;
+import com.eveningoutpost.dexdrip.cgm.medtrum.messages.AuthRx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.AuthTx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.BackFillRx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.BackFillTx;
@@ -37,28 +40,43 @@ import com.eveningoutpost.dexdrip.cgm.medtrum.messages.StatusRx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.StatusTx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.TimeRx;
 import com.eveningoutpost.dexdrip.cgm.medtrum.messages.TimeTx;
+import com.eveningoutpost.dexdrip.ui.helpers.Span;
 import com.eveningoutpost.dexdrip.utils.BtCallBack;
 import com.eveningoutpost.dexdrip.utils.DexCollectionType;
 import com.eveningoutpost.dexdrip.utils.DisconnectReceiver;
+import com.eveningoutpost.dexdrip.utils.bt.Subscription;
+import com.eveningoutpost.dexdrip.utils.framework.WakeLockTrampoline;
 import com.eveningoutpost.dexdrip.xdrip;
-import com.polidea.rxandroidble.RxBleClient;
-import com.polidea.rxandroidble.RxBleConnection;
-import com.polidea.rxandroidble.RxBleDevice;
+import com.polidea.rxandroidble2.RxBleClient;
+import com.polidea.rxandroidble2.RxBleConnection;
+import com.polidea.rxandroidble2.RxBleDevice;
 
 import java.security.InvalidAlgorithmParameterException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import rx.Subscription;
-import rx.schedulers.Schedulers;
+//import rx.Subscription;
+//import rx.schedulers.Schedulers;
+
+import io.reactivex.Observable;
+import io.reactivex.Scheduler;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.schedulers.Schedulers;
+
 
 import static com.eveningoutpost.dexdrip.Models.BgReading.bgReadingInsertMedtrum;
 import static com.eveningoutpost.dexdrip.Models.JoH.msSince;
 import static com.eveningoutpost.dexdrip.Models.JoH.msTill;
 import static com.eveningoutpost.dexdrip.Models.JoH.quietratelimit;
 import static com.eveningoutpost.dexdrip.UtilityModels.Constants.HOUR_IN_MS;
+import static com.eveningoutpost.dexdrip.UtilityModels.Constants.MEDTRUM_SERVICE_FAILOVER_ID;
+import static com.eveningoutpost.dexdrip.UtilityModels.Constants.MEDTRUM_SERVICE_RETRY_ID;
 import static com.eveningoutpost.dexdrip.UtilityModels.Constants.MINUTE_IN_MS;
+import static com.eveningoutpost.dexdrip.UtilityModels.StatusItem.Highlight.BAD;
+import static com.eveningoutpost.dexdrip.UtilityModels.StatusItem.Highlight.CRITICAL;
+import static com.eveningoutpost.dexdrip.UtilityModels.StatusItem.Highlight.GOOD;
+import static com.eveningoutpost.dexdrip.UtilityModels.StatusItem.Highlight.NORMAL;
 import static com.eveningoutpost.dexdrip.cgm.medtrum.Const.CGM_CHARACTERISTIC_INDICATE;
 import static com.eveningoutpost.dexdrip.cgm.medtrum.Const.OPCODE_AUTH_REPLY;
 import static com.eveningoutpost.dexdrip.cgm.medtrum.Const.OPCODE_BACK_REPLY;
@@ -79,6 +97,7 @@ import static com.eveningoutpost.dexdrip.cgm.medtrum.SensorState.NotCalibrated;
 import static com.eveningoutpost.dexdrip.cgm.medtrum.SensorState.Ok;
 import static com.eveningoutpost.dexdrip.cgm.medtrum.TimeKeeper.timeStampFromTickCounter;
 
+import static com.eveningoutpost.dexdrip.xdrip.gs;
 /**
  *
  * jamorham
@@ -96,15 +115,17 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
     private static final long MINIMUM_RECORD_INTERVAL = 280000; // A6 gives records every 2 minutes but we want per 5 minutes as standard
     private static final long MAX_RETRY_BACKOFF_MS = 60000; // sleep for max ms if we have had no signal
     private static final int LISTEN_STASIS_SECONDS = 7200; // max time to be in listen state
-    private static String address = "";
+    private volatile static String address = "";
     private static long serial;
 
-    public static String lastState = "Not running";
+    public static volatile String lastState = "Not running";
+    public static volatile String lastErrorState = "";
 
     private static final int DEFAULT_AUTOMATA_DELAY = 100;
 
     private static volatile STATE state = INIT;
     private static volatile STATE last_automata_state = CLOSED;
+    private static volatile boolean listen_connected = false;
 
     private static Scanner scanner;
 
@@ -188,7 +209,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
     }
 
 
-    public synchronized void automata() {
+    public synchronized boolean automata() {
 
         if ((last_automata_state != state) || (JoH.ratelimit("jam-g5-dupe-auto", 2))) {
             last_automata_state = state;
@@ -252,6 +273,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         } else {
             UserError.Log.d(TAG, "Ignoring duplicate automata state within 2 seconds: " + state);
         }
+        return true;
     }
 
     ///
@@ -270,7 +292,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
     }
 
     private void scan_for_device() {
-        status("Scanning");
+        status(gs(R.string.scanning));
         UserError.Log.d(TAG, "Scanning for device");
         scanner.setAddress(address).scan();
     }
@@ -289,7 +311,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         UserError.Log.d(TAG, "enable features - enter");
         stopListening();
         if (connection != null) {
-            notificationSubscription = connection.setupNotification(Const.CGM_CHARACTERISTIC_NOTIFY)
+            notificationSubscription = new Subscription(connection.setupNotification(Const.CGM_CHARACTERISTIC_NOTIFY)
                     .timeout(LISTEN_STASIS_SECONDS, TimeUnit.SECONDS) // WARN
                     .observeOn(Schedulers.newThread())
                     .doOnNext(notificationObservable -> {
@@ -316,12 +338,12 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
                             }, throwable -> {
                                 UserError.Log.d(TAG, "notification throwable: " + throwable);
                             }
-                    );
+                    ));
 
 
             final InboundStream inboundStream = new InboundStream();
 
-            indicationSubscription = connection.setupIndication(CGM_CHARACTERISTIC_INDICATE)
+            indicationSubscription = new Subscription(connection.setupIndication(CGM_CHARACTERISTIC_INDICATE)
                     .timeout(LISTEN_STASIS_SECONDS, TimeUnit.SECONDS) // WARN
                     .observeOn(Schedulers.newThread())
                     .doOnNext(notificationObservable -> {
@@ -357,7 +379,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
                             }, throwable -> {
                                 UserError.Log.d(TAG, "indication throwable: " + throwable);
                             }
-                    );
+                    ));
         } else {
             UserError.Log.e(TAG, "Connection null when trying to set notifications");
         }
@@ -377,7 +399,8 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
     private synchronized void connect_to_device(boolean auto) {
         if (state == CONNECT) {
             // TODO check mac
-            if (address != null) {
+            //UserError.Log.d(TAG, "Address length: " + address.length());
+            if (address != null && address.length() > 6) {
                 status("Connecting");
 
                 stopConnect();
@@ -385,23 +408,24 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
                 bleDevice = rxBleClient.getBleDevice(address);
 
                 // Listen for connection state changes
-                stateSubscription = bleDevice.observeConnectionStateChanges()
+                stateSubscription = new Subscription(bleDevice.observeConnectionStateChanges()
                         // .observeOn(AndroidSchedulers.mainThread())
                         .subscribeOn(Schedulers.io())
                         .subscribe(this::onConnectionStateChange, throwable -> {
                             UserError.Log.wtf(TAG, "Got Error from state subscription: " + throwable);
-                        });
+                        }));
 
                 // Attempt to establish a connection
+                listen_connected = false;
                 auto = false; // auto not allowed due to timeout
-                connectionSubscription = bleDevice.establishConnection(auto)
+                connectionSubscription = new Subscription(bleDevice.establishConnection(auto)
                         .timeout(LISTEN_STASIS_SECONDS, TimeUnit.SECONDS)
                         // .flatMap(RxBleConnection::discoverServices)
                         // .observeOn(AndroidSchedulers.mainThread())
                         // .doOnUnsubscribe(this::clearSubscription)
                         .subscribeOn(Schedulers.io())
 
-                        .subscribe(this::onConnectionReceived, this::onConnectionFailure);
+                        .subscribe(this::onConnectionReceived, this::onConnectionFailure));
 
             } else {
                 UserError.Log.wtf(TAG, "No transmitter mac address!");
@@ -469,8 +493,15 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
 
         switch (opcode) {
             case OPCODE_AUTH_REPLY:
-                // TODO decode packet, check ok
-                status("Authenticated");
+                final AuthRx authrx = new AuthRx(packet);
+                if (authrx.isValid()) {
+                    status("Authenticated");
+                } else {
+                    errorStatus("AUTHENTICATION FAILED!");
+                    if (JoH.ratelimit("medtrum-auth-fail", 600)) {
+                        UserError.Log.wtf(TAG, "Auth packet failure: " + serial + authrx.toS());
+                    }
+                }
                 changeState(state.next());
                 break;
 
@@ -561,7 +592,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
 
                         final double glucose = backFillRx.getGlucose(backsies.get(index));
                         final int scaled_raw_data = backFillRx.getSensorRawEmulateDex(backsies.get(index));
-                        if (BgReading.getForPreciseTimestamp(timestamp, Constants.MINUTE_IN_MS * 2.5) == null) {
+                        if (BgReading.getForPreciseTimestamp(timestamp, (long)(Constants.MINUTE_IN_MS * 2.5)) == null) {
 
                             if (isNative()) {
                                 // Native version
@@ -665,6 +696,12 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
                         if (isNative()) {
                             if (glucose > 0) {
                                 final BgReading bgReading = bgReadingInsertMedtrum(glucose, JoH.tsl(), null, transmitterData.raw_data);
+                            } else {
+                                if (annex.getState() == NotCalibrated) {
+                                    // just add raw data
+                                    UserError.Log.d(TAG,"Just adding raw data");
+                                    final BgReading bgreading = BgReading.create(transmitterData.raw_data, transmitterData.filtered_data, xdrip.getAppContext(), transmitterData.timestamp);
+                                }
                             }
                             // xDrip calibration as secondary trace
                             final BgReading bgReadingTemp = BgReading.createFromRawNoSave(null, null, transmitterData.raw_data, transmitterData.raw_data, transmitterData.timestamp);
@@ -731,6 +768,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
 
     // We have connected to the device!
     private void onConnectionReceived(final RxBleConnection this_connection) {
+        listen_connected = true;
         status("Connected");
         // TODO close off existing connection?
         connection = this_connection;
@@ -743,7 +781,11 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
     }
 
     private void onConnectionFailure(Throwable throwable) {
-        status("Connection failure");
+        if (listen_connected) {
+            status("Disconnected");
+        } else {
+            status("Connection failure");
+        }
         // TODO under what circumstances should we change state or do something here?
         UserError.Log.d(TAG, "Connection Disconnected/Failed: " + throwable);
         stopConnect();
@@ -933,6 +975,11 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         UserError.Log.d(STATIC_TAG, "Status: " + lastState);
     }
 
+    private static void errorStatus(String msg) {
+        lastErrorState = msg + " " + JoH.hourMinuteString();
+        UserError.Log.e(STATIC_TAG, lastErrorState);
+    }
+
 
     @SuppressLint("ObsoleteSdkInt")
     private static boolean shouldServiceRun() {
@@ -948,8 +995,9 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         if (shouldServiceRun()) {
             final long retry_in = whenToRetryNext();
             UserError.Log.d(TAG, "setRetryTimer: Restarting in: " + (retry_in / Constants.SECOND_IN_MS) + " seconds");
-            serviceIntent = PendingIntent.getService(this, Constants.MEDTRUM_SERVICE_RETRY_ID,
-                    new Intent(this, this.getClass()), 0);
+            // serviceIntent = PendingIntent.getService(this, MEDTRUM_SERVICE_RETRY_ID,
+            //         new Intent(this, this.getClass()), 0);
+            serviceIntent = WakeLockTrampoline.getPendingIntent(this.getClass(), MEDTRUM_SERVICE_RETRY_ID);
             retry_time = JoH.wakeUpIntent(this, retry_in, serviceIntent);
             wakeup_time = JoH.tsl() + retry_in;
         } else {
@@ -962,15 +1010,15 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
             if (quietratelimit("mt-failover-cooldown", 30)) {
                 final long retry_in = Constants.MINUTE_IN_MS * 7;
                 UserError.Log.d(TAG, "setFailOverTimer: Restarting in: " + (retry_in / Constants.SECOND_IN_MS) + " seconds");
-                serviceFailoverIntent = PendingIntent.getService(this, Constants.MEDTRUM_SERVICE_FAILOVER_ID,
-                        new Intent(this, this.getClass()), 0);
+             //   serviceFailoverIntent = PendingIntent.getService(this, MEDTRUM_SERVICE_FAILOVER_ID,
+             //           new Intent(this, this.getClass()), 0);
+                serviceFailoverIntent = WakeLockTrampoline.getPendingIntent(this.getClass(), MEDTRUM_SERVICE_FAILOVER_ID);
                 failover_time = JoH.wakeUpIntent(this, retry_in, serviceFailoverIntent);
             }
         } else {
             UserError.Log.d(TAG, "Not setting retry timer as service should not be running");
         }
     }
-
 
     private static long whenToRetryNext() {
         retry_backoff += Constants.SECOND_IN_MS;
@@ -980,6 +1028,11 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         return Constants.SECOND_IN_MS * 10 + retry_backoff;
     }
 
+
+    public static SpannableString nanoStatus() {
+        if (JoH.emptyString(lastErrorState)) return null;
+        return Span.colorSpan(lastErrorState, CRITICAL.color());
+    }
 
     // Mega Status
     public static List<StatusItem> megaStatus() {
@@ -992,12 +1045,15 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
         final List<StatusItem> l = new ArrayList<>();
 
         l.add(new StatusItem("Phone Service State", lastState));
+        if (!JoH.emptyString(lastErrorState)) {
+            l.add(new StatusItem("Error", lastErrorState, BAD));
+        }
         if (lastAnnex != null) {
             l.add(new StatusItem("Battery", lastAnnex.getBatteryPercent() + "%"));
             if (lastAnnex.charging) {
                 l.add(new StatusItem("Charging", lastAnnex.charged ? "Charged" : "On charge"));
             }
-            l.add(new StatusItem("Sensor State", lastAnnex.getState().getDescription(), lastAnnex.getState() == Ok ? StatusItem.Highlight.GOOD : StatusItem.Highlight.NORMAL));
+            l.add(new StatusItem("Sensor State", lastAnnex.getState().getDescription(), lastAnnex.getState() == Ok ? GOOD : NORMAL));
 
             if (lastAnnex.getState() == SensorState.WarmingUp1) {
                 l.add(new StatusItem("Warm up", "Initial warm up", StatusItem.Highlight.NOTICE));
@@ -1013,7 +1069,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
             }
 
             if (lastAnnex.sensorGood) {
-                l.add(new StatusItem("Sensor", "Good", StatusItem.Highlight.GOOD));
+                l.add(new StatusItem("Sensor", "Good", GOOD));
                 // } else {
                 // if (lastAnnex.getState() == Ok) {
                 //     l.add(new StatusItem("Sensor", "Ok", StatusItem.Highlight.NORMAL));
@@ -1021,18 +1077,18 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
             }
 
             if (lastAnnex.sensorError) {
-                l.add(new StatusItem("Sensor Error", "Error", StatusItem.Highlight.BAD));
+                l.add(new StatusItem("Sensor Error", "Error", BAD));
             }
 
             if (lastAnnex.sensorFail) {
-                l.add(new StatusItem("Sensor Fail", "FAILED", StatusItem.Highlight.CRITICAL));
+                l.add(new StatusItem("Sensor Fail", "FAILED", CRITICAL));
             }
 
             if (lastAnnex.calibrationErrorA) {
-                l.add(new StatusItem("Calibration Error", "Error A", StatusItem.Highlight.BAD));
+                l.add(new StatusItem("Calibration Error", "Error A", BAD));
             }
             if (lastAnnex.calibrationErrorB) {
-                l.add(new StatusItem("Calibration Error", "Error B", StatusItem.Highlight.BAD));
+                l.add(new StatusItem("Calibration Error", "Error B", BAD));
             }
 
             final Pair<Long, Integer> calibration = Medtrum.getCalibration();
@@ -1056,7 +1112,7 @@ public class MedtrumCollectionService extends JamBaseBluetoothService implements
             }
 
             if (lastAnnex.getState() == Ok) {
-                l.add(new StatusItem("Last Glucose", BgGraphBuilder.unitized_string_with_units_static(lastAnnex.calculatedGlucose()) + (lastAnnex.recent() ? "" : " @ " + JoH.niceTimeScalarShort(JoH.msSince(lastAnnex.created))), lastAnnex.recent() ? StatusItem.Highlight.NORMAL : StatusItem.Highlight.NOTICE));
+                l.add(new StatusItem("Last Glucose", BgGraphBuilder.unitized_string_with_units_static(lastAnnex.calculatedGlucose()) + (lastAnnex.recent() ? "" : " @ " + JoH.niceTimeScalarShort(JoH.msSince(lastAnnex.created))), lastAnnex.recent() ? NORMAL : StatusItem.Highlight.NOTICE));
             }
 
             if (retry_time != 0) {

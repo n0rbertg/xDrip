@@ -22,6 +22,7 @@ import org.json.JSONObject;
 
 import java.util.HashMap;
 import java.util.UUID;
+import static com.eveningoutpost.dexdrip.xdrip.gs;
 
 
 /**
@@ -53,7 +54,7 @@ public class NSClientReceiver extends BroadcastReceiver {
 
         switch (action) {
             case Intents.ACTION_NEW_SGV:
-                if (Home.get_follower()) {
+                if (Home.get_follower() && prefs.getBoolean("accept_nsclient_sgv", true)) {
                     if (bundle == null) break;
                     final String sgvs_json = bundle.getString("sgvs", "");
                     if (sgvs_json.length() > 0) {
@@ -119,7 +120,7 @@ public class NSClientReceiver extends BroadcastReceiver {
                     if (glucose_number > 0) {
 
                         if (timeoffset < 0) {
-                            Home.toaststaticnext("Got calibration in the future - cannot process!");
+                            Home.toaststaticnext(gs(R.string.got_calibration_in_the_future__cannot_process));
                             break;
                         }
 
@@ -243,6 +244,9 @@ public class NSClientReceiver extends BroadcastReceiver {
             }
             if (trt_map.containsKey("insulin")) {
                 jsonObject.put("insulin", trt_map.get("insulin"));
+            }
+            if (trt_map.containsKey("insulinJSON")) {
+                jsonObject.put("insulinInjections", trt_map.get("insulinJSON"));
             }
             if (trt_map.containsKey("notes")) {
                 jsonObject.put("notes", trt_map.get("notes"));

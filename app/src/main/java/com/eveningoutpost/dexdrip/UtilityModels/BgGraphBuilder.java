@@ -27,6 +27,7 @@ import com.eveningoutpost.dexdrip.Models.Forecast.TrendLine;
 import com.eveningoutpost.dexdrip.Models.HeartRate;
 import com.eveningoutpost.dexdrip.Models.Iob;
 import com.eveningoutpost.dexdrip.Models.JoH;
+import com.eveningoutpost.dexdrip.Models.Libre2RawValue;
 import com.eveningoutpost.dexdrip.Models.Prediction;
 import com.eveningoutpost.dexdrip.Models.Profile;
 import com.eveningoutpost.dexdrip.Models.StepCounter;
@@ -43,6 +44,7 @@ import com.eveningoutpost.dexdrip.ui.helpers.BitmapLoader;
 import com.eveningoutpost.dexdrip.ui.helpers.ColorUtil;
 import com.eveningoutpost.dexdrip.utils.DexCollectionType;
 import com.eveningoutpost.dexdrip.utils.LibreTrendGraph;
+import com.eveningoutpost.dexdrip.utils.math.RollingAverage;
 import com.eveningoutpost.dexdrip.xdrip;
 import com.google.android.gms.location.DetectedActivity;
 import com.rits.cloning.Cloner;
@@ -79,8 +81,8 @@ import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.X;
 import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.getCol;
 
 public class BgGraphBuilder {
-    public static final int FUZZER = (1000 * 30 * 5); // 2.5 mins?
-    public final static long DEXCOM_PERIOD = 300000;
+    public static final int FUZZER = (1000 * 30 * 5); // 2.5 minutes
+    public final static long DEXCOM_PERIOD = 300_000; // 5 minutes
     public final static double NOISE_TRIGGER = 10;
     public final static double NOISE_TRIGGER_ULTRASENSITIVE = 1;
     public final static double NOISE_TOO_HIGH_FOR_PREDICT = 60;
@@ -104,7 +106,7 @@ public class BgGraphBuilder {
     public double start_time = end_time - ((60000 * 60 * 24)) / FUZZER;
 
 
-    private final static double timeshift = 500000;
+    private final static double timeshift = 500_000;
     private static final int NUM_VALUES = (60 / 5) * 24;
 
     // flag to indicate if readings data has been adjusted
@@ -115,8 +117,8 @@ public class BgGraphBuilder {
     private final List<Treatments> treatments;
     private final static boolean d = false; // debug flag, could be read from preferences
 
-    public Context context;
-    public SharedPreferences prefs;
+    private Context context;
+    private SharedPreferences prefs;
     public double highMark;
     public double lowMark;
     public double defaultMinY;
@@ -135,12 +137,14 @@ public class BgGraphBuilder {
     private final int loaded_numValues;
     private final long loaded_start, loaded_end;
     private final List<BgReading> bgReadings;
+    private List<Libre2RawValue> Libre2RawValues;
     private final List<Calibration> calibrations;
     private final List<BloodTest> bloodtests;
     private final List<PointValue> inRangeValues = new ArrayList<>();
     private final List<PointValue> backfillValues = new ArrayList<>();
-    private final List<PointValue> highValues = new ArrayList<PointValue>();
-    private final List<PointValue> lowValues = new ArrayList<PointValue>();
+    private final List<PointValue> remoteValues = new ArrayList<>();
+    private final List<PointValue> highValues = new ArrayList<>();
+    private final List<PointValue> lowValues = new ArrayList<>();
     private final List<PointValue> pluginValues = new ArrayList<PointValue>();
     private final List<PointValue> rawInterpretedValues = new ArrayList<PointValue>();
     private final List<PointValue> filteredValues = new ArrayList<PointValue>();
@@ -176,8 +180,11 @@ public class BgGraphBuilder {
     public BgGraphBuilder(Context context, long start, long end) {
         this(context, start, end, NUM_VALUES, true);
     }
-
     public BgGraphBuilder(Context context, long start, long end, int numValues, boolean show_prediction) {
+        this(context,start,end,numValues,show_prediction,false);
+    }
+
+    public BgGraphBuilder(Context context, long start, long end, int numValues, boolean show_prediction, final boolean useArchive) {
         // swap argument order if needed
         if (start > end) {
             long temp = end;
@@ -201,6 +208,8 @@ public class BgGraphBuilder {
             loaded_start=start;
             loaded_end=end;
             bgReadings = BgReading.latestForGraph(numValues, start, end);
+            if (DexCollectionType.getDexCollectionType() == DexCollectionType.LibreReceiver)
+                Libre2RawValues = Libre2RawValue.latestForGraph(numValues * 5, start, end);
             plugin_adjusted = false;
         } finally {
             readings_lock.unlock();
@@ -693,7 +702,8 @@ public class BgGraphBuilder {
             }
             lines.add(rawInterpretedLine());
 
-            lines.add(backFillValuesLine());
+            lines.add(remoteValuesLine()); // TODO conditional ?
+            lines.add(backFillValuesLine()); // TODO conditional ?
             lines.add(inRangeValuesLine());
             lines.add(lowValuesLine());
             lines.add(highValuesLine());
@@ -762,6 +772,15 @@ public class BgGraphBuilder {
         line.setColor(Color.parseColor("#55338833"));
         line.setHasLines(false);
         line.setPointRadius(pointSize + 3);
+        line.setHasPoints(true);
+        return line;
+    }
+
+    private Line remoteValuesLine() {
+        final Line line = new Line(remoteValues);
+        line.setColor(Color.parseColor("#55333388"));
+        line.setHasLines(false);
+        line.setPointRadius(pointSize + 4);
         line.setHasPoints(true);
         return line;
     }
@@ -1032,6 +1051,7 @@ public class BgGraphBuilder {
             lowValues.clear();
             inRangeValues.clear();
             backfillValues.clear();
+           remoteValues.clear();
             calibrationValues.clear();
             bloodTestValues.clear();
             pluginValues.clear();
@@ -1040,6 +1060,12 @@ public class BgGraphBuilder {
 
             final double bgScale = bgScale();
             final double now = JoH.ts();
+
+            final boolean show_pseudo_filtered = prefs.getBoolean("show_pseudo_filtered", false);
+            final RollingAverage rollingAverage = show_pseudo_filtered ? new RollingAverage(2) : null;
+            final long rollingOffset = show_pseudo_filtered ? (long) (rollingAverage.getPeak() * DEXCOM_PERIOD) : 0;
+
+
             long highest_bgreading_timestamp = -1; // most recent bgreading timestamp we have
             double trend_start_working = now - (1000 * 60 * 12); // 10 minutes // TODO MAKE PREFERENCE?
             if (bgReadings.size() > 0) {
@@ -1145,6 +1171,7 @@ public class BgGraphBuilder {
             final boolean show_plugin = prefs.getBoolean("plugin_plot_on_graph", false);
             final boolean glucose_from_plugin = prefs.getBoolean("display_glucose_from_plugin", false);
             final boolean illustrate_backfilled_data = prefs.getBoolean("illustrate_backfilled_data", false);
+            final boolean illustrate_remote_data = prefs.getBoolean("illustrate_remote_data", false);
 
             if ((Home.get_follower()) && (bgReadings.size() < 3)) {
                 GcmActivity.requestBGsync();
@@ -1194,6 +1221,12 @@ public class BgGraphBuilder {
 
                 if ((show_filtered) && (bgReading.filtered_calculated_value > 0) && (bgReading.filtered_calculated_value != bgReading.calculated_value)) {
                     filteredValues.add(new PointValue((float) ((bgReading.timestamp - timeshift) / FUZZER), (float) unitized(bgReading.filtered_calculated_value)));
+                } else if (show_pseudo_filtered) {
+                    // TODO differentiate between filtered and pseudo-filtered when both may be in play at different times
+                    final double rollingValue = rollingAverage.put(bgReading.calculated_value);
+                    if (rollingAverage.reachedPeak()) {
+                        filteredValues.add(new PointValue((float) ((bgReading.timestamp + rollingOffset) / FUZZER), (float) unitized(rollingValue)));
+                    }
                 }
                 if ((interpret_raw && (bgReading.raw_calculated > 0))) {
                     rawInterpretedValues.add(new PointValue((float) (bgReading.timestamp / FUZZER), (float) unitized(bgReading.raw_calculated)));
@@ -1215,6 +1248,9 @@ public class BgGraphBuilder {
 
                 if (illustrate_backfilled_data && bgReading.calculated_value > 13 && bgReading.calculated_value < 400 && bgReading.isBackfilled()) {
                     backfillValues.add(bgReadingToPoint(bgReading));
+                }
+                if (illustrate_remote_data && bgReading.calculated_value > 13 && bgReading.calculated_value < 400 && bgReading.isRemote()) {
+                    remoteValues.add(bgReadingToPoint(bgReading));
                 }
 
                 avg2counter++;
@@ -1267,6 +1303,18 @@ public class BgGraphBuilder {
                         Log.d(TAG, "poly Added: " + JoH.qs(polyxList.get(polyxList.size() - 1)) + " / " + JoH.qs(polyyList.get(polyyList.size() - 1), 2));
                 }
 
+            }
+
+            try {
+                if (DexCollectionType.getDexCollectionType() == DexCollectionType.LibreReceiver && prefs.getBoolean("Libre2_showRawGraph",false)) {
+                    for (final Libre2RawValue bgLibre : Libre2RawValues) {
+                        if (bgLibre.glucose > 0) {
+                            rawInterpretedValues.add(new PointValue((float) (bgLibre.timestamp / FUZZER), (float) unitized(bgLibre.glucose)));
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.wtf(TAG, "Exception to generate Raw-Graph Libre2");
             }
             if (avg1counter > 0) {
                 avg1value = avg1value / avg1counter;
@@ -1502,9 +1550,23 @@ public class BgGraphBuilder {
                             mylabel = mylabel + (JoH.qs(treatment.carbs, 1) + "g").replace(".0g", "g");
                         }
                         pv.setLabel(mylabel); // standard label
+
+                        // show basal dose as blue syringe icon
+                        if (treatment.isBasalOnly()) {
+                            //pv.setBitmapScale((float) (0.5f + (treatment.insulin * 5f))); // 0.1U == 100% 0.2U = 150%
+                            BitmapLoader.loadAndSetKey(pv, R.drawable.ic_eyedropper_variant_grey600_24dp, 0);
+                            pv.setBitmapTint(getCol(X.color_basal_tbr));
+                            final Pair<Float, Float> yPositions = GraphTools.bestYPosition(bgReadings, treatment.timestamp, doMgdl, false, highMark, 27d + (18d * consecutiveCloseIcons));
+                            pv.set(treatment.timestamp / FUZZER, yPositions.first);
+                            pv.note = treatment.getBestShortText();
+                            iconValues.add(pv);
+                            lastIconTimestamp = treatment.timestamp;
+                            continue;
+                        }
+
                         //Log.d(TAG, "watchkeypad pv.mylabel: " + mylabel);
                         if ((treatment.notes != null) && (treatment.notes.length() > 0)) {
-                            pv.note = treatment.notes;
+                            pv.note = treatment.getBestShortText();
                             //Log.d(TAG, "watchkeypad pv.note: " + pv.note + " mylabel: " + mylabel);
                             try {
                                 final Pattern p = Pattern.compile(".*?pos:([0-9.]+).*");

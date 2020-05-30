@@ -423,6 +423,20 @@ public class JoH {
         }
     }
 
+    public static void dumpBundle(Bundle bundle, String tag) {
+        if (bundle != null) {
+            for (String key : bundle.keySet()) {
+                Object value = bundle.get(key);
+                if (value != null) {
+                    UserError.Log.d(tag, String.format("%s %s (%s)", key,
+                            value.toString(), value.getClass().getName()));
+                }
+            }
+        } else {
+            UserError.Log.d(tag, "Bundle is empty");
+        }
+    }
+
     /*KS// compare stored byte array hashes
     public static synchronized boolean differentBytes(String name, byte[] bytes) {
         final String id = "differentBytes-" + name;
@@ -672,6 +686,15 @@ public class JoH {
     public static double tolerantParseDouble(String str) throws NumberFormatException {
         return Double.parseDouble(str.replace(",", "."));
 
+    }
+
+    public static double tolerantParseDouble(final String str, final double def) {
+        if (str == null) return def;
+        try {
+            return Double.parseDouble(str.replace(",", "."));
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 
     public static PowerManager.WakeLock getWakeLock(final String name, int millis) {
@@ -1463,6 +1486,23 @@ public class JoH {
         return false;
     }
 
+    public static boolean createSpecialBond(final String thisTAG, final BluetoothDevice device){
+        try {
+            Log.e(thisTAG,"Attempting special bond");
+            Class[] argTypes = new Class[] { int.class };
+            final Method method = device.getClass().getMethod("createBond", argTypes);
+            if (method != null) {
+                return (Boolean) method.invoke(device, 2);
+            } else {
+                Log.e(thisTAG,"CANNOT FIND SPECIAL BOND METHOD!!");
+            }
+        }
+        catch (Exception e) {
+            Log.e(thisTAG, "An exception occured while creating special bond: "+e);
+        }
+        return false;
+    }
+
     public static ByteBuffer bArrayAsBuffer(byte[] bytes) {
         final ByteBuffer bb = ByteBuffer.allocate(bytes.length);
         bb.put(bytes);
@@ -1609,5 +1649,9 @@ public class JoH {
         } catch (NullPointerException e) {
             return false;
         }
+    }
+
+    public static boolean emptyString(final String str) {
+        return str == null || str.length() == 0;
     }
 }

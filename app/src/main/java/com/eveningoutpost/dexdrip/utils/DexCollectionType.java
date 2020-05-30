@@ -1,6 +1,5 @@
 package com.eveningoutpost.dexdrip.utils;
 
-import com.eveningoutpost.dexdrip.G5Model.Ob1G5StateMachine;
 import com.eveningoutpost.dexdrip.Services.DexCollectionService;
 import com.eveningoutpost.dexdrip.Services.DexShareCollectionService;
 import com.eveningoutpost.dexdrip.Services.DoNothingService;
@@ -9,6 +8,8 @@ import com.eveningoutpost.dexdrip.Services.Ob1G5CollectionService;
 import com.eveningoutpost.dexdrip.Services.WifiCollectionService;
 import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.cgm.medtrum.MedtrumCollectionService;
+import com.eveningoutpost.dexdrip.cgm.nsfollow.NightscoutFollowService;
+import com.eveningoutpost.dexdrip.cgm.sharefollow.ShareFollowService;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -36,10 +37,13 @@ public enum DexCollectionType {
     Follower("Follower"),
     LibreAlarm("LibreAlarm"),
     NSEmulator("NSEmulator"),
+    NSFollow("NSFollower"),
+    SHFollow("SHFollower"),
     Medtrum("Medtrum"),
     Disabled("Disabled"),
     Mock("Mock"),
-    Manual("Manual");
+    Manual("Manual"),
+    LibreReceiver("LibreReceiver");
 
     String internalName;
     private static final Map<String, DexCollectionType> mapToInternalName;
@@ -67,10 +71,10 @@ public enum DexCollectionType {
 
         Collections.addAll(usesBluetooth, BluetoothWixel, DexcomShare, DexbridgeWixel, LimiTTer, WifiBlueToothWixel, DexcomG5, WifiDexBridgeWixel, LimiTTerWifi, Medtrum);
         Collections.addAll(usesBtWixel, BluetoothWixel, LimiTTer, WifiBlueToothWixel, LimiTTerWifi); // Name is misleading here, should probably be using dexcollectionservice
-        Collections.addAll(usesWifi, WifiBlueToothWixel,WifiWixel,WifiDexBridgeWixel, Mock, LimiTTerWifi, LibreWifi);
-        Collections.addAll(usesXbridge, DexbridgeWixel,WifiDexBridgeWixel);
+        Collections.addAll(usesWifi, WifiBlueToothWixel, WifiWixel, WifiDexBridgeWixel, Mock, LimiTTerWifi, LibreWifi);
+        Collections.addAll(usesXbridge, DexbridgeWixel, WifiDexBridgeWixel);
         Collections.addAll(usesFiltered, DexbridgeWixel, WifiDexBridgeWixel, DexcomG5, WifiWixel, Follower, Mock); // Bluetooth and Wifi+Bluetooth need dynamic mode
-        Collections.addAll(usesLibre, LimiTTer, LibreAlarm, LimiTTerWifi, LibreWifi);
+        Collections.addAll(usesLibre, LimiTTer, LibreAlarm, LimiTTerWifi, LibreWifi, LibreReceiver);
         Collections.addAll(usesBattery, BluetoothWixel, DexbridgeWixel, WifiBlueToothWixel, WifiDexBridgeWixel, Follower, LimiTTer, LibreAlarm, LimiTTerWifi, LibreWifi); // parakeet separate
         Collections.addAll(usesDexcomRaw, BluetoothWixel, DexbridgeWixel, WifiWixel, WifiBlueToothWixel, DexcomG5, WifiDexBridgeWixel, Mock);
         Collections.addAll(usesTransmitterBattery, WifiWixel, BluetoothWixel, DexbridgeWixel, WifiBlueToothWixel, WifiDexBridgeWixel); // G4 transmitter battery
@@ -102,7 +106,9 @@ public enum DexCollectionType {
         return usesBluetooth.contains(getDexCollectionType());
     }
 
-    public static boolean hasBtWixel() { return usesBtWixel.contains(getDexCollectionType()); }
+    public static boolean hasBtWixel() {
+        return usesBtWixel.contains(getDexCollectionType());
+    }
 
     public static boolean hasXbridgeWixel() {
         return usesXbridge.contains(getDexCollectionType());
@@ -112,45 +118,59 @@ public enum DexCollectionType {
         return usesWifi.contains(getDexCollectionType());
     }
 
-    public static boolean hasLibre() { return usesLibre.contains(getDexCollectionType()); }
+    public static boolean hasLibre() {
+        return usesLibre.contains(getDexCollectionType());
+    }
 
-    public static boolean hasLibre(DexCollectionType t) { return usesLibre.contains(t); }
+    public static boolean hasLibre(DexCollectionType t) {
+        return usesLibre.contains(t);
+    }
 
-    public static boolean hasBattery() { return usesBattery.contains(getDexCollectionType()); }
+    public static boolean hasBattery() {
+        return usesBattery.contains(getDexCollectionType());
+    }
 
     public static boolean hasSensor() {
         return getDexCollectionType() != DexCollectionType.Manual;
     }
 
-    public static boolean hasDexcomRaw() { return hasDexcomRaw(getDexCollectionType()); }
+    public static boolean hasDexcomRaw() {
+        return hasDexcomRaw(getDexCollectionType());
+    }
 
-    public static boolean usesDexCollectionService(DexCollectionType type) { return usesBtWixel.contains(type) || usesXbridge.contains(type) || type.equals(LimiTTer);}
+    public static boolean usesDexCollectionService(DexCollectionType type) {
+        return usesBtWixel.contains(type) || usesXbridge.contains(type) || type.equals(LimiTTer);
+    }
 
-    public static boolean usesClassicTransmitterBattery() { return usesTransmitterBattery.contains(getDexCollectionType()); }
+    public static boolean usesClassicTransmitterBattery() {
+        return usesTransmitterBattery.contains(getDexCollectionType());
+    }
 
     public static boolean hasDexcomRaw(DexCollectionType type) {
         return usesDexcomRaw.contains(type);
     }
 
-    public static boolean isFlakey() { return getDexCollectionType() == DexCollectionType.DexcomG5; }
+    public static boolean isFlakey() {
+        return getDexCollectionType() == DexCollectionType.DexcomG5;
+    }
 
     public static boolean hasFiltered() {
         return does_have_filtered || usesFiltered.contains(getDexCollectionType());
     }
-    
+
     public static boolean isLibreOOPAlgorithm(DexCollectionType collector) {
-    	if(collector == null) {
-    		collector = DexCollectionType.getDexCollectionType();
-    	}
-        return hasLibre(collector) && 
-               Pref.getBooleanDefaultFalse("external_blukon_algorithm");
+        if (collector == null) {
+            collector = DexCollectionType.getDexCollectionType();
+        }
+        return hasLibre(collector) &&
+                Pref.getBooleanDefaultFalse("external_blukon_algorithm");
     }
 
     public static Class<?> getCollectorServiceClass() {
         return getCollectorServiceClass(getDexCollectionType());
     }
 
-    public static Class<?> getCollectorServiceClass(DexCollectionType type) {
+    public static Class<?> getCollectorServiceClass(final DexCollectionType type) {
         switch (type) {
             case DexcomG5:
                 if (Pref.getBooleanDefaultFalse(Ob1G5CollectionService.OB1G5_PREFS)) {
@@ -161,11 +181,17 @@ public enum DexCollectionType {
             case DexcomShare:
                 return DexShareCollectionService.class;
             case WifiWixel:
+            case Mock:
                 return WifiCollectionService.class;
             case Medtrum:
                 return MedtrumCollectionService.class;
             case Follower:
+            case LibreReceiver:
                 return DoNothingService.class;
+            case NSFollow:
+                return NightscoutFollowService.class;
+            case SHFollow:
+                return ShareFollowService.class;
             default:
                 return DexCollectionService.class;
         }
@@ -176,7 +202,7 @@ public enum DexCollectionType {
     public static Boolean getServiceRunningState() {
         final Boolean result = getPhoneServiceRunningState();
         // if phone running don't bother checking wear
-        if ((result !=null) && result) return true;
+        if ((result != null) && result) return true;
         return getWatchServiceRunningState();
     }
 
@@ -218,6 +244,7 @@ public enum DexCollectionType {
         final DexCollectionType dct = getDexCollectionType();
         switch (dct) {
             case NSEmulator:
+            case LibreReceiver:
                 return "Other App";
             case WifiWixel:
                 return "Network G4";
@@ -236,6 +263,10 @@ public enum DexCollectionType {
                 return dct.name();
             case LibreWifi:
                 return "Network libre";
+            case NSFollow:
+                return "Nightscout";
+            case SHFollow:
+                return "Share";
 
             default:
                 return dct.name();
